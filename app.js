@@ -127,6 +127,7 @@ function loadState() {
 
 function saveState(state) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  scheduleMonitorStateSync();
 }
 
 const $ = (id) => document.getElementById(id);
@@ -194,6 +195,7 @@ let timer = null;
 let editingId = null;
 let syncing = false;
 let stableApyRefreshTimer = null;
+let monitorSyncTimer = null;
 let chartSeriesCache = [];
 let chartScrubIndex = null;
 let chartRange = "all"; // "7d" | "30d" | "all"
@@ -203,8 +205,11 @@ const JUP_LEND_API = "https://api.jup.ag/lend/v1";
 const JUP_TOKEN_API = "https://api.jup.ag/tokens/v2";
 const TELEGRAM_NOTIFY_API = "/api/telegram/notify";
 const RWA_ONYC_APY_API = "/api/rwa/onyc-apy";
+const MONITOR_STATE_API = "/api/monitor/state";
 const STABLE_REFRESH_MS = 7 * 60 * 1000;
 const APY_DROP_ALERT_PCT_POINTS = 1;
+const ENABLE_BROWSER_NOTIFICATIONS = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+const ENABLE_SERVER_MONITOR_SYNC = !ENABLE_BROWSER_NOTIFICATIONS;
 const STABLE_SYMBOLS = new Set([
   "USDC",
   "USDT",
@@ -742,6 +747,60 @@ function getEffectiveApyPct(platform) {
   return Number(platform.apyPct ?? 0);
 }
 
+function buildMonitorStatePayload() {
+  return {
+    settings: {
+      intervalMs: state.settings.intervalMs,
+      currency: state.settings.currency,
+      decimals: state.settings.decimals,
+      solanaRpcUrl: state.settings.solanaRpcUrl,
+      stableApyInUse: state.settings.stableApyInUse
+        ? {
+            key: String(state.settings.stableApyInUse.key ?? ""),
+            label: String(state.settings.stableApyInUse.label ?? ""),
+            apyPct: Number(state.settings.stableApyInUse.apyPct ?? NaN),
+          }
+        : null,
+    },
+    platforms: state.platforms.map((platform) => ({
+      id: platform.id,
+      name: platform.name,
+      symbol: platform.symbol,
+      deposit: platform.deposit,
+      apyPct: platform.apyPct,
+      model: platform.model,
+      startMs: platform.startMs,
+      source: platform.source,
+      wallet: platform.wallet,
+      externalId: platform.externalId,
+      apyLastFetchedMs: platform.apyLastFetchedMs,
+      apyTtlMs: platform.apyTtlMs,
+    })),
+  };
+}
+
+async function syncMonitorStateNow() {
+  if (!ENABLE_SERVER_MONITOR_SYNC) return;
+  try {
+    await fetchJson(MONITOR_STATE_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildMonitorStatePayload()),
+    });
+  } catch {
+    // Server-side monitoring is optional in local/dev contexts.
+  }
+}
+
+function scheduleMonitorStateSync(delayMs = 1200) {
+  if (!ENABLE_SERVER_MONITOR_SYNC) return;
+  if (monitorSyncTimer) clearTimeout(monitorSyncTimer);
+  monitorSyncTimer = setTimeout(() => {
+    monitorSyncTimer = null;
+    void syncMonitorStateNow();
+  }, delayMs);
+}
+
 function tick() {
   const nowMs = Date.now();
   try {
@@ -764,7 +823,9 @@ function tick() {
   } catch {
     // Non-critical visual hint.
   }
-  void processNotificationTriggers(nowMs);
+  if (ENABLE_BROWSER_NOTIFICATIONS) {
+    void processNotificationTriggers(nowMs);
+  }
 }
 
 function escapeHtml(s) {
@@ -1791,6 +1852,7 @@ function init() {
   startStableApyAutoRefresh();
   setChartRange("all");
   switchTopView("dashboard");
+  scheduleMonitorStateSync(0);
   tick();
 }
 

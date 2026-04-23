@@ -1,0 +1,7 @@
+{
+  "name": "defi-apy-tracker",
+  "private": true,
+  "dependencies": {
+    "@vercel/blob": "latest"
+  }
+}
