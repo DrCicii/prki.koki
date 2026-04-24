@@ -249,22 +249,40 @@
       </section>
 
       <section id="viewApyBoard" style="display:none;">
-      <section class="card card--table">
-        <div class="card__title card__title--row">
-          <span>APY Board</span>
-          <div style="display:flex; gap:8px;">
-            <button id="btnTestTelegram" class="btn btn--ghost" type="button">Send test Telegram</button>
+        <section class="card card--table">
+          <div class="card__title card__title--row">
+            <span>APY Board</span>
+            <div style="display:flex; gap:8px;">
+              <button id="btnTestTelegram" class="btn btn--ghost" type="button">Send test Telegram</button>
             <button id="btnStopLiveApy" class="btn btn--ghost" type="button">Stop using live APY</button>
             <button id="btnRefreshStableApy" class="btn btn--ghost" type="button">Refresh</button>
           </div>
         </div>
-        <div class="hint" style="padding: 0 18px 10px;">
-          Auto-refresh every 7 minutes. Shows Kamino stablecoin supply APY plus ONyc APY from RWA.xyz.
-          <span id="stableApyLastUpdated"></span>
-        </div>
+          <div class="hint" style="padding: 0 18px 10px;">
+            Auto-refresh every 7 minutes. Shows Kamino stablecoin supply APY plus ONyc APY from RWA.xyz.
+            <span id="stableApyLastUpdated"></span>
+          </div>
+          <div class="notifyPanel">
+            <div class="notifyPanel__row">
+              <span class="notifyPanel__label">State sync</span>
+              <span id="notifySyncStatus" class="notifyPanel__value">Checking...</span>
+            </div>
+            <div class="notifyPanel__row">
+              <span class="notifyPanel__label">Cron monitor</span>
+              <span id="notifyCronStatus" class="notifyPanel__value">Checking...</span>
+            </div>
+            <div class="notifyPanel__row">
+              <span class="notifyPanel__label">Last result</span>
+              <span id="notifyResultStatus" class="notifyPanel__value">Checking...</span>
+            </div>
+            <div class="notifyPanel__row">
+              <span class="notifyPanel__label">Telegram test</span>
+              <span id="notifyTelegramStatus" class="notifyPanel__value">Not sent yet</span>
+            </div>
+          </div>
 
-        <div class="tableWrap">
-          <table class="table" aria-label="Stablecoin APYs">
+          <div class="tableWrap">
+            <table class="table" aria-label="Stablecoin APYs">
             <thead>
               <tr>
                 <th>Protocol</th>

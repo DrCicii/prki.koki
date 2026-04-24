@@ -478,6 +478,32 @@ label.file input{display:none}
 
 .card--table{padding:14px 0}
 .card--table .card__title{padding:0 18px}
+.notifyPanel{
+  margin: 0 18px 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(120,200,255,.12);
+  background: rgba(0,0,0,.16);
+  display: grid;
+  gap: 8px;
+}
+.notifyPanel__row{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:12px;
+}
+.notifyPanel__label{
+  color:var(--muted2);
+  font-size:12px;
+}
+.notifyPanel__value{
+  color:var(--text);
+  font-size:12px;
+  font-weight:700;
+  text-align:right;
+  font-variant-numeric: tabular-nums;
+}
 .tableWrap{overflow:auto; border-top:1px solid rgba(120,200,255,.08)}
 .table{
   width:100%;

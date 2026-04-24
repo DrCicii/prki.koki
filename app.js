@@ -182,6 +182,10 @@ const els = {
   btnRefreshStableApy: $("btnRefreshStableApy"),
   stableApyRows: $("stableApyRows"),
   stableApyLastUpdated: $("stableApyLastUpdated"),
+  notifySyncStatus: $("notifySyncStatus"),
+  notifyCronStatus: $("notifyCronStatus"),
+  notifyResultStatus: $("notifyResultStatus"),
+  notifyTelegramStatus: $("notifyTelegramStatus"),
 
   inIntervalMs: $("inIntervalMs"),
   inCurrency: $("inCurrency"),
@@ -214,6 +218,8 @@ let chartRange = "all"; // "7d" | "30d" | "all"
 const pendingManualApyResetIds = new Set();
 let selectedLiveApyForAdd = null;
 let selectedLiveApyForEdit = null;
+let latestMonitorStatus = null;
+let latestTelegramTestStatus = "Not sent yet";
 
 const KAMINO_API = "https://api.kamino.finance";
 const JUP_LEND_API = "https://api.jup.ag/lend/v1";
@@ -305,6 +311,68 @@ function formatUtcStamp(ms) {
   const mi = String(d.getUTCMinutes()).padStart(2, "0");
   const ss = String(d.getUTCSeconds()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss} UTC`;
+}
+
+function formatLocalStatusStamp(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "Not yet";
+  return new Date(n).toLocaleString();
+}
+
+function setStatusText(el, text) {
+  if (el) el.textContent = text;
+}
+
+function renderNotificationStatusPanel() {
+  const status = latestMonitorStatus;
+  if (!status) {
+    setStatusText(els.notifySyncStatus, ENABLE_SERVER_MONITOR_SYNC ? "Checking..." : "Local mode");
+    setStatusText(els.notifyCronStatus, ENABLE_SERVER_MONITOR_SYNC ? "Checking..." : "Local mode");
+    setStatusText(els.notifyResultStatus, ENABLE_SERVER_MONITOR_SYNC ? "Checking..." : "Local mode");
+    setStatusText(els.notifyTelegramStatus, latestTelegramTestStatus);
+    return;
+  }
+
+  if (!status.configured) {
+    setStatusText(els.notifySyncStatus, "No shared state yet");
+    setStatusText(els.notifyCronStatus, "Waiting for first sync");
+    setStatusText(els.notifyResultStatus, "Pending");
+    setStatusText(els.notifyTelegramStatus, latestTelegramTestStatus);
+    return;
+  }
+
+  const notification = status.notification && typeof status.notification === "object" ? status.notification : null;
+  const syncText = `Saved ${formatLocalStatusStamp(status.updatedAtMs)}`;
+  const cronText = notification?.lastRunAtMs
+    ? `Ran ${formatLocalStatusStamp(notification.lastRunAtMs)}`
+    : notification?.initialized
+      ? "Initialized, waiting for daily run"
+      : "Waiting for first daily run";
+  const resultText = notification?.lastResult
+    ? String(notification.lastResult)
+    : "Pending";
+
+  setStatusText(els.notifySyncStatus, syncText);
+  setStatusText(els.notifyCronStatus, cronText);
+  setStatusText(els.notifyResultStatus, resultText);
+  setStatusText(els.notifyTelegramStatus, latestTelegramTestStatus);
+}
+
+async function refreshNotificationStatusPanel() {
+  if (!ENABLE_SERVER_MONITOR_SYNC) {
+    renderNotificationStatusPanel();
+    return;
+  }
+  try {
+    latestMonitorStatus = await fetchJson(MONITOR_STATE_API);
+  } catch {
+    latestMonitorStatus = {
+      configured: false,
+      notification: null,
+      updatedAtMs: 0,
+    };
+  }
+  renderNotificationStatusPanel();
 }
 
 function platformLabel(platform) {
@@ -989,12 +1057,15 @@ async function syncMonitorStateNow() {
   } catch {
     // Server-side monitoring is optional in local/dev contexts.
   }
+  await refreshNotificationStatusPanel();
 }
 
 async function loadSharedStateFromServer() {
   if (!ENABLE_SERVER_MONITOR_SYNC) return false;
   try {
     const payload = await fetchJson(MONITOR_STATE_API);
+    latestMonitorStatus = payload;
+    renderNotificationStatusPanel();
     if (!payload?.configured) return false;
     state = normalizeStateSnapshot({
       settings: payload.settings,
@@ -1003,6 +1074,8 @@ async function loadSharedStateFromServer() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     return true;
   } catch {
+    latestMonitorStatus = null;
+    renderNotificationStatusPanel();
     return false;
   }
 }
@@ -1879,6 +1952,7 @@ function switchTopView(view) {
 
 async function init() {
   attachGlobalErrorHandlers();
+  renderNotificationStatusPanel();
 
   const loadedSharedState = await loadSharedStateFromServer();
   if (!loadedSharedState && ENABLE_SERVER_MONITOR_SYNC) {
@@ -1940,11 +2014,15 @@ async function init() {
       els.btnTestTelegram.textContent = "Sending...";
       try {
         await sendTestTelegramNotification();
+        latestTelegramTestStatus = `Delivered ${new Date().toLocaleString()}`;
+        renderNotificationStatusPanel();
         if (els.stableApyLastUpdated) {
           els.stableApyLastUpdated.textContent = ` Test Telegram notification sent at ${new Date().toLocaleString()}.`;
         }
       } catch (error) {
         const message = error?.message ?? String(error);
+        latestTelegramTestStatus = `Failed: ${message}`;
+        renderNotificationStatusPanel();
         if (els.stableApyLastUpdated) {
           els.stableApyLastUpdated.textContent = ` Test Telegram failed: ${message}`;
         }
@@ -2126,6 +2204,7 @@ async function init() {
   }
 
   void refreshStableApyTable();
+  void refreshNotificationStatusPanel();
   startStableApyAutoRefresh();
   setChartRange("all");
   switchTopView("dashboard");

@@ -72,6 +72,17 @@ module.exports = async function handler(req, res) {
         platformCount: Array.isArray(state?.platforms) ? state.platforms.length : 0,
         settings: state?.settings ?? null,
         platforms: Array.isArray(state?.platforms) ? state.platforms : [],
+        notification: state?.notification && typeof state.notification === "object"
+          ? {
+              initialized: Boolean(state.notification.initialized),
+              lastTotalEarned:
+                Number.isFinite(Number(state.notification.lastTotalEarned))
+                  ? Number(state.notification.lastTotalEarned)
+                  : null,
+              lastRunAtMs: Number(state.notification.lastRunAtMs ?? 0),
+              lastResult: String(state.notification.lastResult ?? ""),
+            }
+          : null,
       });
     } catch (error) {
       return res.status(500).json({
