@@ -9,6 +9,7 @@ function normalizeState(input) {
   const next = input && typeof input === "object" ? input : {};
   const settings = next.settings && typeof next.settings === "object" ? next.settings : {};
   const platforms = Array.isArray(next.platforms) ? next.platforms : [];
+  const syncMeta = next.syncMeta && typeof next.syncMeta === "object" ? next.syncMeta : {};
 
   return {
     settings: {
@@ -43,7 +44,20 @@ function normalizeState(input) {
         externalId: typeof x.externalId === "string" ? x.externalId : "",
         apyLastFetchedMs: Number(x.apyLastFetchedMs ?? 0),
         apyTtlMs: Number(x.apyTtlMs ?? 60_000),
+        liveApy:
+          x.liveApy && typeof x.liveApy === "object"
+            ? {
+                key: String(x.liveApy.key ?? ""),
+                label: String(x.liveApy.label ?? ""),
+                apyPct: Number(x.liveApy.apyPct ?? NaN),
+              }
+            : null,
       })),
+    syncMeta: {
+      manualApyResetIds: Array.isArray(syncMeta.manualApyResetIds)
+        ? syncMeta.manualApyResetIds.map((id) => String(id))
+        : [],
+    },
   };
 }
 
@@ -56,6 +70,8 @@ module.exports = async function handler(req, res) {
         configured: Boolean(state && Array.isArray(state.platforms) && state.platforms.length),
         updatedAtMs: Number(state?.updatedAtMs ?? 0),
         platformCount: Array.isArray(state?.platforms) ? state.platforms.length : 0,
+        settings: state?.settings ?? null,
+        platforms: Array.isArray(state?.platforms) ? state.platforms : [],
       });
     } catch (error) {
       return res.status(500).json({
@@ -72,17 +88,44 @@ module.exports = async function handler(req, res) {
 
   try {
     const normalized = normalizeState(req.body);
+    const current = await readMonitorState();
+    const currentNotification =
+      current && current.notification && typeof current.notification === "object"
+        ? current.notification
+        : null;
+    const lastApyByPlatform =
+      currentNotification && currentNotification.lastApyByPlatform && typeof currentNotification.lastApyByPlatform === "object"
+        ? { ...currentNotification.lastApyByPlatform }
+        : {};
+    const currentIds = new Set(normalized.platforms.map((platform) => platform.id));
+
+    for (const platformId of Object.keys(lastApyByPlatform)) {
+      if (!currentIds.has(platformId)) {
+        delete lastApyByPlatform[platformId];
+      }
+    }
+
+    for (const platformId of normalized.syncMeta.manualApyResetIds) {
+      delete lastApyByPlatform[platformId];
+    }
+
     const next = {
       version: 1,
       updatedAtMs: Date.now(),
       settings: normalized.settings,
       platforms: normalized.platforms,
       notification: {
-        initialized: false,
-        lastTotalEarned: null,
-        lastApyByPlatform: {},
-        lastRunAtMs: 0,
-        lastResult: "reset",
+        initialized: Boolean(currentNotification?.initialized),
+        lastTotalEarned:
+          currentNotification && Number.isFinite(Number(currentNotification.lastTotalEarned))
+            ? Number(currentNotification.lastTotalEarned)
+            : null,
+        lastApyByPlatform,
+        lastRunAtMs:
+          currentNotification && Number.isFinite(Number(currentNotification.lastRunAtMs))
+            ? Number(currentNotification.lastRunAtMs)
+            : 0,
+        lastResult: currentNotification?.lastResult ?? "synced",
       },
     };
     await writeMonitorState(next);

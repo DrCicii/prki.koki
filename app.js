@@ -118,6 +118,14 @@ function loadState() {
           externalId: typeof x.externalId === "string" ? x.externalId : "",
           apyLastFetchedMs: Number(x.apyLastFetchedMs ?? 0),
           apyTtlMs: Number(x.apyTtlMs ?? 60_000),
+          liveApy:
+            x.liveApy && typeof x.liveApy === "object"
+              ? {
+                  key: String(x.liveApy.key ?? ""),
+                  label: String(x.liveApy.label ?? ""),
+                  apyPct: Number(x.liveApy.apyPct ?? NaN),
+                }
+              : null,
         })),
     };
   } catch {
@@ -203,6 +211,9 @@ let earnedAnimationFrame = null;
 let chartSeriesCache = [];
 let chartScrubIndex = null;
 let chartRange = "all"; // "7d" | "30d" | "all"
+const pendingManualApyResetIds = new Set();
+let selectedLiveApyForAdd = null;
+let selectedLiveApyForEdit = null;
 
 const KAMINO_API = "https://api.kamino.finance";
 const JUP_LEND_API = "https://api.jup.ag/lend/v1";
@@ -268,6 +279,23 @@ function computeTotalEarnRatePerSecond(nowMs) {
   return totalPerYear / (365.2425 * 24 * 60 * 60);
 }
 
+function normalizeLiveApySelection(liveApy) {
+  if (!liveApy || typeof liveApy !== "object") return null;
+  const key = String(liveApy.key ?? "").trim();
+  const label = String(liveApy.label ?? "").trim();
+  const apyPct = Number(liveApy.apyPct ?? NaN);
+  if (!key || !Number.isFinite(apyPct)) return null;
+  return { key, label, apyPct };
+}
+
+function getPlatformLiveApy(platform) {
+  return normalizeLiveApySelection(platform?.liveApy);
+}
+
+function getCurrentLiveApySelection() {
+  return editingId ? selectedLiveApyForEdit : selectedLiveApyForAdd;
+}
+
 function formatUtcStamp(ms) {
   const d = new Date(ms);
   const yyyy = d.getUTCFullYear();
@@ -294,6 +322,47 @@ async function sendTelegramNotification(text) {
   } catch {
     // Notifications are optional; never break the UI loop on alert errors.
   }
+}
+
+function normalizeStateSnapshot(input) {
+  const parsed = input && typeof input === "object" ? input : {};
+  const s = parsed.settings ?? {};
+  const p = Array.isArray(parsed.platforms) ? parsed.platforms : [];
+  return {
+    settings: {
+      intervalMs: clampInt(Number(s.intervalMs), 200, 60000),
+      currency: typeof s.currency === "string" ? s.currency : "USD",
+      decimals: clampInt(Number(s.decimals), 0, 8),
+      solanaRpcUrl:
+        typeof s.solanaRpcUrl === "string" && s.solanaRpcUrl
+          ? s.solanaRpcUrl
+          : "https://api.mainnet-beta.solana.com",
+      stableApyInUse:
+        s.stableApyInUse && typeof s.stableApyInUse === "object"
+          ? {
+              key: String(s.stableApyInUse.key ?? ""),
+              label: String(s.stableApyInUse.label ?? ""),
+              apyPct: Number(s.stableApyInUse.apyPct ?? NaN),
+            }
+          : null,
+    },
+    platforms: p
+      .filter((x) => x && typeof x === "object")
+      .map((x) => ({
+        id: typeof x.id === "string" ? x.id : uid(),
+        name: String(x.name ?? "Unknown"),
+        symbol: String(x.symbol ?? ""),
+        deposit: Number(x.deposit ?? 0),
+        apyPct: Number(x.apyPct ?? 0),
+        model: x.model === "simple" ? "simple" : "effective",
+        startMs: Number(x.startMs ?? Date.now()),
+        source: x.source === "kamino" || x.source === "jupiter" ? x.source : "manual",
+        wallet: typeof x.wallet === "string" ? x.wallet : "",
+        externalId: typeof x.externalId === "string" ? x.externalId : "",
+        apyLastFetchedMs: Number(x.apyLastFetchedMs ?? 0),
+        apyTtlMs: Number(x.apyTtlMs ?? 60_000),
+      })),
+  };
 }
 
 async function sendTestTelegramNotification() {
@@ -497,7 +566,8 @@ function renderTable(nowMs) {
       const apyStr = `${effectiveApyPct.toFixed(2)}%`;
       const startStr = new Date(p.startMs).toLocaleString();
       const modelBadge = p.model === "simple" ? "Simple" : "APY";
-      const liveBadge = state.settings.stableApyInUse ? `<span class="pill" style="margin-left:8px">LIVE</span>` : "";
+      const platformLiveApy = getPlatformLiveApy(p);
+        const liveBadge = platformLiveApy ? `<span class="pill" style="margin-left:8px">LIVE ${escapeHtml(platformLiveApy.label || "APY")}</span>` : "";
       const sourceBadge =
         p.source && p.source !== "manual"
           ? `<span class="pill" style="margin-left:8px">${escapeHtml(p.source)}</span>`
@@ -859,7 +929,7 @@ function renderClockSkew(nowMs) {
 }
 
 function getEffectiveApyPct(platform) {
-  const live = state.settings.stableApyInUse;
+  const live = getPlatformLiveApy(platform) || normalizeLiveApySelection(state.settings.stableApyInUse);
   if (live && Number.isFinite(Number(live.apyPct))) return Number(live.apyPct);
   return Number(platform.apyPct ?? 0);
 }
@@ -892,20 +962,48 @@ function buildMonitorStatePayload() {
       externalId: platform.externalId,
       apyLastFetchedMs: platform.apyLastFetchedMs,
       apyTtlMs: platform.apyTtlMs,
+      liveApy: platform.liveApy
+        ? {
+            key: String(platform.liveApy.key ?? ""),
+            label: String(platform.liveApy.label ?? ""),
+            apyPct: Number(platform.liveApy.apyPct ?? NaN),
+          }
+        : null,
     })),
+    syncMeta: {
+      manualApyResetIds: Array.from(pendingManualApyResetIds),
+    },
   };
 }
 
 async function syncMonitorStateNow() {
   if (!ENABLE_SERVER_MONITOR_SYNC) return;
   try {
+    const payload = buildMonitorStatePayload();
     await fetchJson(MONITOR_STATE_API, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildMonitorStatePayload()),
+      body: JSON.stringify(payload),
     });
+    pendingManualApyResetIds.clear();
   } catch {
     // Server-side monitoring is optional in local/dev contexts.
+  }
+}
+
+async function loadSharedStateFromServer() {
+  if (!ENABLE_SERVER_MONITOR_SYNC) return false;
+  try {
+    const payload = await fetchJson(MONITOR_STATE_API);
+    if (!payload?.configured) return false;
+    state = normalizeStateSnapshot({
+      settings: payload.settings,
+      platforms: payload.platforms,
+    });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -954,7 +1052,7 @@ function escapeHtml(s) {
     .replaceAll("'", "&#039;");
 }
 
-function addPlatform({ name, symbol, deposit, apyPct, startMs, model }) {
+function addPlatform({ name, symbol, deposit, apyPct, startMs, model, liveApy = null }) {
   const p = {
     id: uid(),
     name,
@@ -968,6 +1066,7 @@ function addPlatform({ name, symbol, deposit, apyPct, startMs, model }) {
     externalId: "",
     apyLastFetchedMs: 0,
     apyTtlMs: 60_000,
+    liveApy: normalizeLiveApySelection(liveApy),
   };
   state.platforms = [p, ...state.platforms];
   saveState(state);
@@ -1594,19 +1693,46 @@ async function refreshStableApyTable() {
     warnings.push(`RWA.xyz ONyc: ${onycRes.reason?.message ?? String(onycRes.reason)}`);
   }
   renderStableApyRows(rows);
+  const rowsByKey = new Map(rows.map((row) => [row.key, row]));
+  let changedAny = false;
+  state.platforms = state.platforms.map((platform) => {
+    const liveApy = getPlatformLiveApy(platform);
+    if (!liveApy?.key) return platform;
+    const match = rowsByKey.get(liveApy.key);
+    if (!match || !Number.isFinite(Number(match.apy))) return platform;
+    changedAny = true;
+    return {
+      ...platform,
+      liveApy: {
+        key: liveApy.key,
+        label: match.pool,
+        apyPct: Number(match.apy) * 100,
+      },
+    };
+  });
 
-  const inUse = state.settings.stableApyInUse;
-  if (inUse?.key) {
-    const match = rows.find((r) => r.key === inUse.key);
-    if (match) {
-      state.settings.stableApyInUse = {
-        key: inUse.key,
+  const activeSelection = getCurrentLiveApySelection();
+  if (activeSelection?.key) {
+    const match = rowsByKey.get(activeSelection.key);
+    if (match && Number.isFinite(Number(match.apy))) {
+      const nextSelection = {
+        key: activeSelection.key,
         label: match.pool,
         apyPct: Number(match.apy) * 100,
       };
-      saveState(state);
-      tick();
+      if (editingId) {
+        selectedLiveApyForEdit = nextSelection;
+        if (els.editApy) els.editApy.value = nextSelection.apyPct.toFixed(4);
+      } else {
+        selectedLiveApyForAdd = nextSelection;
+        if (els.inApy) els.inApy.value = nextSelection.apyPct.toFixed(4);
+      }
     }
+  }
+
+  if (changedAny) {
+    saveState(state);
+    tick();
   }
   if (els.stableApyLastUpdated) {
     const stamp = new Date().toLocaleString();
@@ -1668,12 +1794,16 @@ async function refreshApyIfNeeded(nowMs) {
 
 function deletePlatform(id) {
   state.platforms = state.platforms.filter((p) => p.id !== id);
+  pendingManualApyResetIds.delete(id);
   saveState(state);
   tick();
 }
 
-function updatePlatform(id, patch) {
+function updatePlatform(id, patch, options = {}) {
   state.platforms = state.platforms.map((p) => (p.id === id ? { ...p, ...patch } : p));
+  if (options.resetApyComparison) {
+    pendingManualApyResetIds.add(id);
+  }
   saveState(state);
   tick();
 }
@@ -1714,6 +1844,14 @@ async function importJsonFile(file) {
         apyPct: Number(x.apyPct ?? 0),
         model: x.model === "simple" ? "simple" : "effective",
         startMs: Number(x.startMs ?? Date.now()),
+        liveApy:
+          x.liveApy && typeof x.liveApy === "object"
+            ? {
+                key: String(x.liveApy.key ?? ""),
+                label: String(x.liveApy.label ?? ""),
+                apyPct: Number(x.liveApy.apyPct ?? NaN),
+              }
+            : null,
       })),
   };
 
@@ -1729,9 +1867,6 @@ function bindSettingsToUi() {
   els.inDecimals.value = String(state.settings.decimals);
   els.hintInterval.textContent = String(Math.max(0.2, state.settings.intervalMs / 1000).toFixed(state.settings.intervalMs < 1000 ? 1 : 0));
   if (els.inRpcUrl) els.inRpcUrl.value = state.settings.solanaRpcUrl || "https://api.mainnet-beta.solana.com";
-  if (els.inApy && state.settings.stableApyInUse && Number.isFinite(state.settings.stableApyInUse.apyPct)) {
-    els.inApy.value = Number(state.settings.stableApyInUse.apyPct).toFixed(4);
-  }
 }
 
 function switchTopView(view) {
@@ -1742,8 +1877,13 @@ function switchTopView(view) {
   if (els.tabApyBoard) els.tabApyBoard.classList.toggle("tab--active", !showDashboard);
 }
 
-function init() {
+async function init() {
   attachGlobalErrorHandlers();
+
+  const loadedSharedState = await loadSharedStateFromServer();
+  if (!loadedSharedState && ENABLE_SERVER_MONITOR_SYNC) {
+    scheduleMonitorStateSync(0);
+  }
 
   if (els.formAdd) {
     els.formAdd.addEventListener("submit", (e) => {
@@ -1759,7 +1899,7 @@ function init() {
     if (!Number.isFinite(deposit) || deposit < 0) return;
     if (!Number.isFinite(apyPct)) return;
 
-    addPlatform({ name, symbol, deposit, apyPct, startMs, model });
+    addPlatform({ name, symbol, deposit, apyPct, startMs, model, liveApy: selectedLiveApyForAdd });
     els.inName.value = "";
     els.inSymbol.value = "";
     els.inDeposit.value = "";
@@ -1817,12 +1957,16 @@ function init() {
   }
   if (els.btnStopLiveApy) {
     els.btnStopLiveApy.addEventListener("click", () => {
-      state.settings.stableApyInUse = null;
-      saveState(state);
-      if (els.stableApyLastUpdated) {
-        els.stableApyLastUpdated.textContent = " Live APY disabled.";
+      if (editingId) {
+        selectedLiveApyForEdit = null;
+      } else {
+        selectedLiveApyForAdd = null;
       }
-      tick();
+      if (els.stableApyLastUpdated) {
+        els.stableApyLastUpdated.textContent = editingId
+          ? " Live APY cleared for the edit form."
+          : " Live APY cleared for new positions.";
+      }
     });
   }
   if (els.tabDashboard) els.tabDashboard.addEventListener("click", () => switchTopView("dashboard"));
@@ -1835,13 +1979,19 @@ function init() {
       const label = String(btn.getAttribute("data-label") ?? "");
       const apyPct = Number(btn.getAttribute("data-apy-pct"));
       if (!key || !Number.isFinite(apyPct)) return;
-      state.settings.stableApyInUse = { key, label, apyPct };
-      saveState(state);
-      if (els.inApy) els.inApy.value = apyPct.toFixed(4);
-      if (els.stableApyLastUpdated) {
-        els.stableApyLastUpdated.textContent = ` In use: ${label} (${apyPct.toFixed(2)}%).`;
+      const nextLiveApy = { key, label, apyPct };
+      if (editingId) {
+        selectedLiveApyForEdit = nextLiveApy;
+        if (els.editApy) els.editApy.value = apyPct.toFixed(4);
+      } else {
+        selectedLiveApyForAdd = nextLiveApy;
+        if (els.inApy) els.inApy.value = apyPct.toFixed(4);
       }
-      tick();
+      if (els.stableApyLastUpdated) {
+        els.stableApyLastUpdated.textContent = editingId
+          ? ` Selected for edited position: ${label} (${apyPct.toFixed(2)}%).`
+          : ` Selected for new position: ${label} (${apyPct.toFixed(2)}%).`;
+      }
     });
   }
   if (els.earningsChart) {
@@ -1919,6 +2069,10 @@ function init() {
       els.editSymbol.value = p.symbol ?? "";
       els.editDeposit.value = String(p.deposit);
       els.editApy.value = String(p.apyPct);
+      selectedLiveApyForEdit = getPlatformLiveApy(p);
+      if (selectedLiveApyForEdit) {
+        els.editApy.value = selectedLiveApyForEdit.apyPct.toFixed(4);
+      }
       els.editStart.value = toDatetimeLocalValue(p.startMs);
       els.editModel.value = p.model === "simple" ? "simple" : "effective";
       els.dlgEdit.showModal();
@@ -1931,6 +2085,7 @@ function init() {
     els.dlgEdit.addEventListener("close", () => {
     if (els.dlgEdit.returnValue !== "save") {
       editingId = null;
+      selectedLiveApyForEdit = null;
       return;
     }
     const id = editingId;
@@ -1949,7 +2104,12 @@ function init() {
     if (!Number.isFinite(apyPct)) return;
     if (!Number.isFinite(startMs)) return;
 
-    updatePlatform(id, { name, symbol, deposit, apyPct, startMs, model });
+    updatePlatform(
+      id,
+      { name, symbol, deposit, apyPct, startMs, model, liveApy: normalizeLiveApySelection(selectedLiveApyForEdit) },
+      { resetApyComparison: true }
+    );
+    selectedLiveApyForEdit = null;
   });
   }
 
@@ -1969,13 +2129,19 @@ function init() {
   startStableApyAutoRefresh();
   setChartRange("all");
   switchTopView("dashboard");
-  scheduleMonitorStateSync(0);
+  if (loadedSharedState) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } else {
+    scheduleMonitorStateSync(0);
+  }
   if (!earnedAnimationFrame) {
     earnedAnimationFrame = requestAnimationFrame(animateEarnedCounter);
   }
   tick();
 }
 
-init();
+void init();
+
+
 
 

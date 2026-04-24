@@ -54,6 +54,15 @@ function getEffectiveApyPct(platform, liveApyPct) {
   return Number.isFinite(liveApyPct) ? liveApyPct : Number(platform.apyPct ?? 0);
 }
 
+function normalizeLiveApySelection(liveApy) {
+  if (!liveApy || typeof liveApy !== "object") return null;
+  const key = String(liveApy.key ?? "").trim();
+  const label = String(liveApy.label ?? "").trim();
+  const apyPct = Number(liveApy.apyPct ?? NaN);
+  if (!key || !Number.isFinite(apyPct)) return null;
+  return { key, label, apyPct };
+}
+
 function buildInitialNotificationState(platforms, liveApyPct, totalEarned) {
   const lastApyByPlatform = {};
   for (const platform of platforms) {
@@ -88,13 +97,22 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, skipped: "no platforms configured for monitoring" });
     }
 
-    let liveApyPct = NaN;
-    try {
-      const live = await resolveStableApyOverride(saved.settings?.stableApyInUse);
-      liveApyPct = Number(live?.apyPct);
-    } catch {
-      liveApyPct = Number(saved.settings?.stableApyInUse?.apyPct ?? NaN);
-    }
+    const liveApyCache = new Map();
+    const resolvePlatformLiveApyPct = async (platform) => {
+      const liveSetting = normalizeLiveApySelection(platform.liveApy) || normalizeLiveApySelection(saved.settings?.stableApyInUse);
+      if (!liveSetting?.key) return NaN;
+      if (liveApyCache.has(liveSetting.key)) return liveApyCache.get(liveSetting.key);
+      try {
+        const resolved = await resolveStableApyOverride(liveSetting);
+        const apyPct = Number(resolved?.apyPct);
+        liveApyCache.set(liveSetting.key, apyPct);
+        return apyPct;
+      } catch {
+        const fallbackApyPct = Number(liveSetting.apyPct ?? NaN);
+        liveApyCache.set(liveSetting.key, fallbackApyPct);
+        return fallbackApyPct;
+      }
+    };
 
     const nowMs = Date.now();
     const currency = String(saved.settings?.currency ?? "USD");
@@ -102,9 +120,14 @@ module.exports = async function handler(req, res) {
       ? Number(saved.settings.decimals)
       : 4;
 
+    const effectiveApyByPlatformId = {};
+    for (const platform of saved.platforms) {
+      effectiveApyByPlatformId[platform.id] = await resolvePlatformLiveApyPct(platform);
+    }
+
     const totalDeposit = saved.platforms.reduce((acc, p) => acc + (Number.isFinite(p.deposit) ? p.deposit : 0), 0);
     const totalValue = saved.platforms.reduce(
-      (acc, p) => acc + computeValueNow(p, nowMs, liveApyPct),
+      (acc, p) => acc + computeValueNow(p, nowMs, effectiveApyByPlatformId[p.id]),
       0
     );
     const totalEarned = totalValue - totalDeposit;
@@ -113,7 +136,14 @@ module.exports = async function handler(req, res) {
       ? saved.notification
       : null;
     if (!previous || !previous.initialized) {
-      saved.notification = buildInitialNotificationState(saved.platforms, liveApyPct, totalEarned);
+      saved.notification = buildInitialNotificationState(
+        saved.platforms,
+        null,
+        totalEarned
+      );
+      for (const platform of saved.platforms) {
+        saved.notification.lastApyByPlatform[platform.id] = Number(getEffectiveApyPct(platform, effectiveApyByPlatformId[platform.id]));
+      }
       await writeMonitorState(saved);
       return res.status(200).json({
         ok: true,
@@ -140,7 +170,7 @@ module.exports = async function handler(req, res) {
     }
 
     for (const platform of saved.platforms) {
-      const currentApy = Number(getEffectiveApyPct(platform, liveApyPct));
+      const currentApy = Number(getEffectiveApyPct(platform, effectiveApyByPlatformId[platform.id]));
       const prevApy = Number(lastApyByPlatform[platform.id]);
       if (Number.isFinite(prevApy) && Number.isFinite(currentApy)) {
         const drop = prevApy - currentApy;
@@ -170,7 +200,7 @@ module.exports = async function handler(req, res) {
       ok: true,
       totalEarned,
       messagesSent: messages.length,
-      liveApyPct: Number.isFinite(liveApyPct) ? liveApyPct : null,
+      liveApyPct: null,
     });
   } catch (error) {
     return res.status(500).json({
